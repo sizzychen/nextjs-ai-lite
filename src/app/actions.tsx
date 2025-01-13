@@ -18,12 +18,21 @@ export interface Message {
 
 // Streaming Chat 
 export async function continueTextConversation(messages: CoreMessage[]) {
-  const result = await streamText({
-    model: openai('gpt-4-turbo'),
-    messages,
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'HTTP-Referer': 'https://github.com',
+      'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'openai/gpt-4-turbo-preview',
+      messages,
+      stream: true
+    })
   });
 
-  const stream = createStreamableValue(result.textStream);
+  const stream = createStreamableValue(response.body);
   return stream.value;
 }
 
@@ -31,42 +40,63 @@ export async function continueTextConversation(messages: CoreMessage[]) {
 export async function continueConversation(history: Message[]) {
   const stream = createStreamableUI();
 
-  const { text, toolResults } = await generateText({
-    model: openai('gpt-3.5-turbo'),
-    system: 'You are a friendly weather assistant!',
-    messages: history,
-    tools: {
-      showWeather: {
-        description: 'Show the weather for a given location.',
-        parameters: z.object({
-          city: z.string().describe('The city to show the weather for.'),
-          unit: z
-            .enum(['F'])
-            .describe('The unit to display the temperature in'),
-        }),
-        execute: async ({ city, unit }) => {
-          stream.done(<Weather city={city} unit={unit} />);
-          return `Here's the weather for ${city}!`; 
-        },
-      },
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'HTTP-Referer': 'https://github.com',
+      'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json'
     },
+    body: JSON.stringify({
+      model: 'openai/gpt-3.5-turbo',
+      messages: [
+        { role: 'system', content: 'You are a friendly weather assistant!' },
+        ...history
+      ],
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'showWeather',
+          description: 'Show the weather for a given location.',
+          parameters: {
+            type: 'object',
+            properties: {
+              city: { type: 'string', description: 'The city to show the weather for.' },
+              unit: { type: 'string', enum: ['F'], description: 'The unit to display the temperature in' }
+            },
+            required: ['city', 'unit']
+          }
+        }
+      }]
+    })
   });
 
-  return {
-    messages: [
-      ...history,
-      {
-        role: 'assistant' as const,
-        content:
-          text || toolResults.map(toolResult => toolResult.result).join(),
-        display: stream.value,
-      },
-    ],
-  };
-}
+        const completion = await response.json();
+        const text = completion.choices[0]?.message?.content;
+        const toolResults = completion.choices[0]?.message?.tool_calls || [];
 
+        if (toolResults.length > 0) {
+          await Promise.all(toolResults.map(async (toolCall) => {
+            if (toolCall.function.name === 'showWeather') {
+              const { city, unit } = JSON.parse(toolCall.function.arguments);
+              stream.done(<Weather city={city} unit={unit} />);
+            }
+          }));
+        }
+
+        return {
+          messages: [
+            ...history,
+            {
+              role: 'assistant' as const,
+              content: text || '',
+              display: stream.value,
+            },
+          ],
+        };
+      }
 // Utils
 export async function checkAIAvailability() {
-  const envVarExists = !!process.env.OPENAI_API_KEY;
+  const envVarExists = !!process.env.OPENROUTER_API_KEY;
   return envVarExists;
 }
